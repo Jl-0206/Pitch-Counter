@@ -247,16 +247,37 @@ export default function App() {
 
   const undoLast = () => {
     if (pitches.length === 0) return;
-    let prev = pitches.slice(0, -1);
-    if (prev.length > 0 && prev[prev.length - 1].synthetic) prev = prev.slice(0, -1);
+
+    // Strip trailing synthetic events (e.g. auto-walk from useEffect)
+    let prev = [...pitches];
+    while (prev.length > 0 && prev[prev.length - 1].synthetic) {
+      prev = prev.slice(0, -1);
+    }
+    // Remove the last real pitch
+    if (prev.length > 0) prev = prev.slice(0, -1);
+    // Strip any newly exposed trailing synthetics
+    while (prev.length > 0 && prev[prev.length - 1].synthetic) {
+      prev = prev.slice(0, -1);
+    }
+
+    // Recalculate balls & strikes from scratch
     let b = 0, s = 0;
     for (const p of prev) {
       if (p.synthetic) continue;
-      if (p.type === "ball" || p.type === "wild_pitch") b = Math.min(b + 1, MAX_BALLS);
-      else if (p.type === "strike" || p.type === "swinging_strike" || p.type === "foul_tip") s = Math.min(s + 1, MAX_STRIKES);
-      else if (p.type === "foul") s = s < 2 ? s + 1 : s;
+      if (p.type === "in_play_hit" || p.type === "in_play_out" || p.type === "hbp") {
+        b = 0; s = 0;
+      } else if (p.type === "ball" || p.type === "wild_pitch") {
+        b = Math.min(b + 1, MAX_BALLS);
+      } else if (p.type === "strike" || p.type === "swinging_strike" || p.type === "foul_tip") {
+        s = Math.min(s + 1, MAX_STRIKES);
+      } else if (p.type === "foul") {
+        s = s < 2 ? s + 1 : s;
+      }
     }
-    setBalls(b); setStrikes(s); setPitches(prev);
+
+    setBalls(b);
+    setStrikes(s);
+    setPitches(prev);
     const lastReal = [...prev].reverse().find(p => !p.synthetic);
     setLastAction(lastReal ? lastReal.type : null);
   };
