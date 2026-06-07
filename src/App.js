@@ -243,7 +243,6 @@ export default function App() {
   };
 
   const resetCount = () => { setBalls(0); setStrikes(0); setLastAction("reset"); };
-  const resetAll = () => { setBalls(0); setStrikes(0); setPitches([]); setLastAction(null); };
 
   const undoLast = () => {
     if (pitches.length === 0) return;
@@ -544,7 +543,7 @@ export default function App() {
         <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
           <button onClick={undoLast} disabled={pitches.length === 0} style={{ flex: 1, background: "#1e293b", border: "1px solid #334155", borderRadius: 8, padding: "11px", color: pitches.length === 0 ? "#374151" : "#94a3b8", fontSize: 13, cursor: pitches.length === 0 ? "not-allowed" : "pointer", letterSpacing: "0.1em", textTransform: "uppercase", fontFamily: "'Georgia', serif" }}>↩ Undo</button>
           <button onClick={resetCount} style={{ flex: 1, background: "#1e293b", border: "1px solid #334155", borderRadius: 8, padding: "11px", color: "#94a3b8", fontSize: 13, cursor: "pointer", letterSpacing: "0.1em", textTransform: "uppercase", fontFamily: "'Georgia', serif" }}>Reset Count</button>
-          <button onClick={resetAll} style={{ flex: 1, background: "#1e293b", border: "1px solid #334155", borderRadius: 8, padding: "11px", color: "#94a3b8", fontSize: 13, cursor: "pointer", letterSpacing: "0.1em", textTransform: "uppercase", fontFamily: "'Georgia', serif" }}>New AB</button>
+
         </div>
         {sessions.length > 0 && (
           <div style={{ background: "#111827", border: "1px solid #1e3a6e", borderRadius: 12, padding: "16px 20px", marginBottom: 14 }}>
