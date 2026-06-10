@@ -359,7 +359,7 @@ export default function App() {
       ? [...currentSessions, { pitcher: currentPitcherNumber || "—", pitchCount: currentPitches.filter(p => !p.synthetic).length, strikePct: calcStrikePct(currentPitches), pitches: [...currentPitches] }]
       : currentSessions;
     if (allSessions.length === 0) return;
-    const gameData = { label: currentLabel || "Untitled Game", date: currentDate, sessions: allSessions, savedAt: new Date().toISOString() };
+    const gameData = { label: currentLabel || "Untitled Game", date: currentDate, sessions: allSessions, savedAt: new Date().toISOString(), status: "in_progress" };
     setAutoSaveStatus("saving");
     try {
       if (activeGameId) {
@@ -390,17 +390,56 @@ export default function App() {
   };
 
   const finishGame = async () => {
-    await autoSave(sessions, pitches, pitcherNumber, gameLabel, gameDate);
+    // Final save then mark as finished
+    const allSessions = pitches.length > 0
+      ? [...sessions, { pitcher: pitcherNumber || "—", pitchCount: pitches.filter(p => !p.synthetic).length, strikePct: calcStrikePct(pitches), pitches: [...pitches] }]
+      : sessions;
+    if (allSessions.length > 0 && activeGameId) {
+      const gameData = { label: gameLabel || "Untitled Game", date: gameDate, sessions: allSessions, savedAt: new Date().toISOString(), status: "finished" };
+      try {
+        await updateDoc(doc(db, "games", activeGameId), gameData);
+        setSavedGames(prev => prev.map(g => g.id === activeGameId ? { id: activeGameId, ...gameData } : g));
+      } catch (e) { console.error(e); }
+    }
     setActiveGameId(null);
     setSessions([]); setPitches([]); setBalls(0); setStrikes(0);
     setPitcherNumber(""); setLastAction(null);
     setScreen("home");
-    // Reset label for next game
     setSavedGames(prev => {
       setGameLabel(getDefaultLabel(prev));
       return prev;
     });
     setGameDate(new Date().toISOString().slice(0, 10));
+  };
+
+  const resumeGame = (game) => {
+    // Restore game state from saved data
+    // The last session is the active pitcher session, previous ones are completed
+    setActiveGameId(game.id);
+    setGameLabel(game.label);
+    setGameDate(game.date);
+    if (game.sessions && game.sessions.length > 0) {
+      const completedSessions = game.sessions.slice(0, -1);
+      const lastSession = game.sessions[game.sessions.length - 1];
+      setSessions(completedSessions);
+      setPitches(lastSession.pitches || []);
+      setPitcherNumber(lastSession.pitcher === "—" ? "" : lastSession.pitcher);
+      // Recalculate count from last session pitches
+      let b = 0, s = 0;
+      for (const p of (lastSession.pitches || [])) {
+        if (p.synthetic) continue;
+        if (p.type === "in_play_hit" || p.type === "in_play_out" || p.type === "hbp") { b = 0; s = 0; }
+        else if (p.type === "ball" || p.type === "wild_pitch") b = Math.min(b + 1, MAX_BALLS);
+        else if (p.type === "strike" || p.type === "swinging_strike" || p.type === "foul_tip") s = Math.min(s + 1, MAX_STRIKES);
+        else if (p.type === "foul") s = s < 2 ? s + 1 : s;
+      }
+      setBalls(b); setStrikes(s);
+      const lastReal = [...(lastSession.pitches || [])].reverse().find(p => !p.synthetic);
+      setLastAction(lastReal ? lastReal.type : null);
+    } else {
+      setSessions([]); setPitches([]); setBalls(0); setStrikes(0); setLastAction(null);
+    }
+    setScreen("game");
   };
 
   const deleteGame = async (id) => {
@@ -453,27 +492,51 @@ export default function App() {
           <button onClick={() => setScreen("game")} style={{ width: "100%", background: "linear-gradient(135deg, #1a3a6e, #0f2340)", border: "1px solid #3b6fde", borderRadius: 10, padding: "13px", color: "#93c5fd", fontSize: 15, fontWeight: "bold", cursor: "pointer", letterSpacing: "0.15em", textTransform: "uppercase", fontFamily: "'Georgia', serif" }}>⚾ Start Game</button>
         </div>
         {!storageReady && <div style={{ textAlign: "center", color: "#374e7e", fontSize: 13 }}>Loading games...</div>}
-        {storageReady && savedGames.length > 0 && (
-          <div>
-            <div style={{ fontSize: 10, letterSpacing: "0.35em", color: "#374e7e", textTransform: "uppercase", marginBottom: 12 }}>Game History</div>
-            {savedGames.map(game => (
-              <div key={game.id} style={{ background: "#111827", border: "1px solid #1e3a6e", borderRadius: 12, padding: "14px 18px", marginBottom: 10, cursor: "pointer" }} onClick={() => { setViewGame(game); setScreen("history"); }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-                  <div>
-                    <div style={{ color: "#e8eaf6", fontWeight: "bold", fontSize: 15, marginBottom: 3 }}>{game.label}</div>
-                    <div style={{ color: "#4b6a9e", fontSize: 12 }}>{game.date} · {game.sessions.length} pitcher{game.sessions.length !== 1 ? "s" : ""}</div>
-                  </div>
-                  <div style={{ textAlign: "right" }}>
-                    {game.sessions.map((s, i) => (
-                      <div key={i} style={{ fontSize: 12, color: s.strikePct >= 60 ? "#22c55e" : s.strikePct >= 45 ? "#f59e0b" : "#ef4444" }}>#{s.pitcher}: {s.strikePct !== null ? `${s.strikePct}%` : "—"}</div>
-                    ))}
-                  </div>
+        {storageReady && (() => {
+          const inProgress = savedGames.filter(g => g.status === "in_progress");
+          const finished = savedGames.filter(g => g.status !== "in_progress");
+          return (
+            <>
+              {inProgress.length > 0 && (
+                <div style={{ marginBottom: 20 }}>
+                  <div style={{ fontSize: 10, letterSpacing: "0.35em", color: "#f59e0b", textTransform: "uppercase", marginBottom: 12 }}>⏸ In Progress</div>
+                  {inProgress.map(game => (
+                    <div key={game.id} style={{ background: "#1a1500", border: "1px solid #f59e0b44", borderRadius: 12, padding: "14px 18px", marginBottom: 10 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <div>
+                          <div style={{ color: "#e8eaf6", fontWeight: "bold", fontSize: 15, marginBottom: 3 }}>{game.label}</div>
+                          <div style={{ color: "#6b5a1e", fontSize: 12 }}>{game.date} · {game.sessions.length} pitcher{game.sessions.length !== 1 ? "s" : ""}</div>
+                        </div>
+                        <button onClick={() => resumeGame(game)} style={{ background: "linear-gradient(135deg, #78350f, #431407)", border: "1px solid #f59e0b", borderRadius: 8, padding: "9px 16px", color: "#fcd34d", fontSize: 13, fontWeight: "bold", cursor: "pointer", fontFamily: "'Georgia', serif", whiteSpace: "nowrap" }}>▶ Resume</button>
+                      </div>
+                    </div>
+                  ))}
                 </div>
-              </div>
-            ))}
-          </div>
-        )}
-        {storageReady && savedGames.length === 0 && <div style={{ textAlign: "center", color: "#374e7e", fontSize: 13, padding: "20px 0" }}>No saved games yet. Start a new game above!</div>}
+              )}
+              {finished.length > 0 && (
+                <div>
+                  <div style={{ fontSize: 10, letterSpacing: "0.35em", color: "#374e7e", textTransform: "uppercase", marginBottom: 12 }}>Game History</div>
+                  {finished.map(game => (
+                    <div key={game.id} style={{ background: "#111827", border: "1px solid #1e3a6e", borderRadius: 12, padding: "14px 18px", marginBottom: 10, cursor: "pointer" }} onClick={() => { setViewGame(game); setScreen("history"); }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                        <div>
+                          <div style={{ color: "#e8eaf6", fontWeight: "bold", fontSize: 15, marginBottom: 3 }}>{game.label}</div>
+                          <div style={{ color: "#4b6a9e", fontSize: 12 }}>{game.date} · {game.sessions.length} pitcher{game.sessions.length !== 1 ? "s" : ""}</div>
+                        </div>
+                        <div style={{ textAlign: "right" }}>
+                          {game.sessions.map((s, i) => (
+                            <div key={i} style={{ fontSize: 12, color: s.strikePct >= 60 ? "#22c55e" : s.strikePct >= 45 ? "#f59e0b" : "#ef4444" }}>#{s.pitcher}: {s.strikePct !== null ? `${s.strikePct}%` : "—"}</div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {savedGames.length === 0 && <div style={{ textAlign: "center", color: "#374e7e", fontSize: 13, padding: "20px 0" }}>No saved games yet. Start a new game above!</div>}
+            </>
+          );
+        })()}
       </div>
     </div>
   );
