@@ -1,12 +1,12 @@
 import { useState, useEffect, useRef } from "react";
 import { db } from "./firebase";
 import {
-  collection, addDoc, getDocs, deleteDoc, doc, orderBy, query
+  collection, addDoc, getDocs, deleteDoc, doc, orderBy, query, setDoc, updateDoc
 } from "firebase/firestore";
 
 const PITCH_TYPES = [
-  { id: "strike", label: "Strike", key: "S", color: "#ef4444", bg: "#7f1d1d" },
   { id: "ball", label: "Ball", key: "B", color: "#22c55e", bg: "#14532d" },
+  { id: "strike", label: "Strike", key: "S", color: "#ef4444", bg: "#7f1d1d" },
   { id: "in_play_hit", label: "In Play (Hit)", key: "H", color: "#f59e0b", bg: "#78350f" },
   { id: "foul", label: "Foul", key: "F", color: "#a78bfa", bg: "#3b0764" },
   { id: "swinging_strike", label: "Swing & Miss", key: "W", color: "#f97316", bg: "#7c2d12" },
@@ -31,30 +31,85 @@ const STRIKE_TYPES = new Set(["strike", "swinging_strike", "foul_tip", "foul"]);
 const MAX_BALLS = 4;
 const MAX_STRIKES = 3;
 
-function calcStrikePct(pitches) {
+function calcStrikeStats(pitches) {
   const real = pitches.filter(p => !p.synthetic);
-  if (real.length === 0) return null;
-  return Math.round((real.filter(p => STRIKE_TYPES.has(p.type)).length / real.length) * 100);
+  let strikeCount = 0, strikePitches = 0;
+  let currentStrikes = 0;
+  for (const p of real) {
+    const isFoul = p.type === "foul";
+    const isStrike = STRIKE_TYPES.has(p.type);
+    if (isFoul && currentStrikes >= 2) {
+      // Foul at 2 strikes: counts as pitch but NOT a strike
+    } else if (isStrike) {
+      strikePitches++;
+      if (p.type === "strike" || p.type === "swinging_strike" || p.type === "foul_tip") {
+        currentStrikes = Math.min(currentStrikes + 1, MAX_STRIKES);
+      } else if (isFoul) {
+        currentStrikes = Math.min(currentStrikes + 1, MAX_STRIKES);
+      }
+    }
+    // Reset strike count on at-bat ending events
+    if (currentStrikes >= MAX_STRIKES || p.type === "in_play_hit" || p.type === "in_play_out" || p.type === "hbp" || p.type === "ball" || p.type === "wild_pitch") {
+      if (p.type === "ball" || p.type === "wild_pitch") {
+        // balls don't reset strike count
+      } else {
+        currentStrikes = 0;
+      }
+    }
+    strikeCount = strikePitches;
+  }
+  return { strikes: strikePitches, total: real.length };
+}
+
+function calcStrikePct(pitches) {
+  const { strikes, total } = calcStrikeStats(pitches);
+  if (total === 0) return null;
+  return Math.round((strikes / total) * 100);
 }
 
 function buildChartData(pitches) {
   const real = pitches.filter(p => !p.synthetic);
-  let strikes = 0;
+  let strikes = 0, currentStrikes = 0;
   return real.map((p, i) => {
-    if (STRIKE_TYPES.has(p.type)) strikes++;
+    const isFoul = p.type === "foul";
+    const isStrike = STRIKE_TYPES.has(p.type);
+    if (isFoul && currentStrikes >= 2) {
+      // foul at 2 strikes: doesn't count
+    } else if (isStrike) {
+      strikes++;
+      if (p.type === "strike" || p.type === "swinging_strike" || p.type === "foul_tip" || isFoul) {
+        currentStrikes = Math.min(currentStrikes + 1, MAX_STRIKES);
+      }
+    }
+    if (currentStrikes >= MAX_STRIKES || p.type === "in_play_hit" || p.type === "in_play_out" || p.type === "hbp") {
+      currentStrikes = 0;
+    }
     return { pitch: i + 1, pct: Math.round((strikes / (i + 1)) * 100) };
   });
 }
 
 function buildGameChartData(sessions) {
-  let offset = 0;
+  let offset = 0, totalStrikes = 0, totalPitches = 0;
   const series = [];
   for (const s of sessions) {
     const real = s.pitches.filter(p => !p.synthetic);
-    let strikes = 0;
+    let currentStrikes = 0;
     real.forEach((p, i) => {
-      if (STRIKE_TYPES.has(p.type)) strikes++;
-      series.push({ pitch: offset + i + 1, pct: Math.round((strikes / (i + 1)) * 100), pitcher: s.pitcher });
+      const isFoul = p.type === "foul";
+      const isStrike = STRIKE_TYPES.has(p.type);
+      if (isFoul && currentStrikes >= 2) {
+        // foul at 2 strikes: doesn't count
+      } else if (isStrike) {
+        totalStrikes++;
+        if (p.type === "strike" || p.type === "swinging_strike" || p.type === "foul_tip" || isFoul) {
+          currentStrikes = Math.min(currentStrikes + 1, MAX_STRIKES);
+        }
+      }
+      if (currentStrikes >= MAX_STRIKES || p.type === "in_play_hit" || p.type === "in_play_out" || p.type === "hbp") {
+        currentStrikes = 0;
+      }
+      totalPitches++;
+      series.push({ pitch: offset + i + 1, pct: Math.round((totalStrikes / totalPitches) * 100), pitcher: s.pitcher });
     });
     offset += real.length;
   }
@@ -176,6 +231,7 @@ export default function App() {
   const [storageReady, setStorageReady] = useState(false);
   const [saveError, setSaveError] = useState(null);
 
+  const todayStr = new Date().toLocaleDateString("en-US", { month: "2-digit", day: "2-digit", year: "numeric" });
   const [gameLabel, setGameLabel] = useState("");
   const [gameDate, setGameDate] = useState(new Date().toISOString().slice(0, 10));
   const [balls, setBalls] = useState(0);
@@ -189,8 +245,18 @@ export default function App() {
   const [showExport, setShowExport] = useState(false);
   const [copied, setCopied] = useState(false);
   const [viewGame, setViewGame] = useState(null);
-  const [confirmSave, setConfirmSave] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState(null);
+  const [activeGameId, setActiveGameId] = useState(null);
+  const [autoSaveStatus, setAutoSaveStatus] = useState(null); // "saving" | "saved" | "error"
+
+  // Derive smart default game label from saved games
+  const getDefaultLabel = (games) => {
+    const today = new Date().toISOString().slice(0, 10);
+    const todayGames = games.filter(g => g.date === today);
+    const num = todayGames.length + 1;
+    const formatted = new Date().toLocaleDateString("en-US", { month: "2-digit", day: "2-digit", year: "numeric" });
+    return `${formatted} - Game ${num}`;
+  };
 
   // Load games from Firestore on mount
   useEffect(() => {
@@ -200,6 +266,7 @@ export default function App() {
         const snapshot = await getDocs(q);
         const games = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
         setSavedGames(games);
+        setGameLabel(getDefaultLabel(games));
       } catch (e) {
         setSaveError("Could not connect to database. Check your Firebase config.");
         console.error(e);
@@ -229,17 +296,22 @@ export default function App() {
   const recordPitch = (type) => {
     const pitch = { type, timestamp: Date.now(), pitcher: pitcherNumber || "—" };
     if (type === "hbp") {
-      setPitches(prev => [...prev, pitch, { type: "walk", timestamp: Date.now() + 1, pitcher: pitcherNumber || "—", synthetic: true }]);
+      const hbpPitches = [...pitches, pitch, { type: "walk", timestamp: Date.now() + 1, pitcher: pitcherNumber || "—", synthetic: true }];
+      setPitches(hbpPitches);
       setLastAction(type); triggerFlash(type);
       setTimeout(() => { setBalls(0); setStrikes(0); }, 1200);
+      autoSave(sessions, hbpPitches, pitcherNumber, gameLabel, gameDate);
       return;
     }
-    setPitches(prev => [...prev, pitch]);
+    const newPitches = [...pitches, pitch];
+    setPitches(newPitches);
     setLastAction(type); triggerFlash(type);
     if (type === "in_play_hit" || type === "in_play_out") { setBalls(0); setStrikes(0); }
     else if (type === "ball" || type === "wild_pitch") setBalls(prev => Math.min(prev + 1, MAX_BALLS));
     else if (type === "strike" || type === "swinging_strike" || type === "foul_tip") setStrikes(prev => Math.min(prev + 1, MAX_STRIKES));
     else if (type === "foul") setStrikes(prev => (prev < 2 ? prev + 1 : prev));
+    // Auto-save after every pitch
+    autoSave(sessions, newPitches, pitcherNumber, gameLabel, gameDate);
   };
 
   const resetCount = () => { setBalls(0); setStrikes(0); setLastAction("reset"); };
@@ -281,31 +353,54 @@ export default function App() {
     setLastAction(lastReal ? lastReal.type : null);
   };
 
-  const changePitcher = () => {
-    if (pitches.length > 0) {
-      setSessions(prev => [...prev, { pitcher: pitcherNumber || "—", pitchCount: pitches.filter(p => !p.synthetic).length, strikePct: calcStrikePct(pitches), pitches: [...pitches] }]);
+  // Auto-save current game state to Firestore
+  const autoSave = async (currentSessions, currentPitches, currentPitcherNumber, currentLabel, currentDate) => {
+    const allSessions = currentPitches.length > 0
+      ? [...currentSessions, { pitcher: currentPitcherNumber || "—", pitchCount: currentPitches.filter(p => !p.synthetic).length, strikePct: calcStrikePct(currentPitches), pitches: [...currentPitches] }]
+      : currentSessions;
+    if (allSessions.length === 0) return;
+    const gameData = { label: currentLabel || "Untitled Game", date: currentDate, sessions: allSessions, savedAt: new Date().toISOString() };
+    setAutoSaveStatus("saving");
+    try {
+      if (activeGameId) {
+        await updateDoc(doc(db, "games", activeGameId), gameData);
+        setSavedGames(prev => prev.map(g => g.id === activeGameId ? { id: activeGameId, ...gameData } : g));
+      } else {
+        const docRef = await addDoc(collection(db, "games"), gameData);
+        setActiveGameId(docRef.id);
+        setSavedGames(prev => [{ id: docRef.id, ...gameData }, ...prev]);
+      }
+      setAutoSaveStatus("saved");
+      setTimeout(() => setAutoSaveStatus(null), 2000);
+    } catch (e) {
+      console.error(e);
+      setAutoSaveStatus("error");
+      setTimeout(() => setAutoSaveStatus(null), 3000);
     }
+  };
+
+  const changePitcher = () => {
+    const newSession = pitches.length > 0
+      ? { pitcher: pitcherNumber || "—", pitchCount: pitches.filter(p => !p.synthetic).length, strikePct: calcStrikePct(pitches), pitches: [...pitches] }
+      : null;
+    const newSessions = newSession ? [...sessions, newSession] : sessions;
+    if (newSession) setSessions(newSessions);
+    autoSave(newSessions, [], "", gameLabel, gameDate);
     setPitches([]); setBalls(0); setStrikes(0); setLastAction(null); setPitcherNumber("");
   };
 
-  const saveGame = async () => {
-    const allSessions = pitches.length > 0
-      ? [...sessions, { pitcher: pitcherNumber || "—", pitchCount: pitches.filter(p => !p.synthetic).length, strikePct: calcStrikePct(pitches), pitches: [...pitches] }]
-      : sessions;
-    const game = { label: gameLabel || "Untitled Game", date: gameDate, sessions: allSessions, savedAt: new Date().toISOString() };
-    try {
-      const docRef = await addDoc(collection(db, "games"), game);
-      const newGame = { id: docRef.id, ...game };
-      setSavedGames(prev => [newGame, ...prev]);
-    } catch (e) {
-      alert("Error saving game. Check your Firebase config.");
-      console.error(e);
-      return;
-    }
-    setGameLabel(""); setGameDate(new Date().toISOString().slice(0, 10));
+  const finishGame = async () => {
+    await autoSave(sessions, pitches, pitcherNumber, gameLabel, gameDate);
+    setActiveGameId(null);
     setSessions([]); setPitches([]); setBalls(0); setStrikes(0);
-    setPitcherNumber(""); setLastAction(null); setConfirmSave(false);
+    setPitcherNumber(""); setLastAction(null);
     setScreen("home");
+    // Reset label for next game
+    setSavedGames(prev => {
+      setGameLabel(getDefaultLabel(prev));
+      return prev;
+    });
+    setGameDate(new Date().toISOString().slice(0, 10));
   };
 
   const deleteGame = async (id) => {
@@ -472,17 +567,14 @@ export default function App() {
             <div style={{ color: "#e8eaf6", fontWeight: "bold", fontSize: 15 }}>{gameLabel || "New Game"}</div>
             <div style={{ color: "#4b6a9e", fontSize: 11 }}>{gameDate}</div>
           </div>
-          <button onClick={() => setConfirmSave(true)} style={{ background: "linear-gradient(135deg, #14532d, #0f2340)", border: "1px solid #22c55e", borderRadius: 8, padding: "8px 14px", color: "#86efac", fontSize: 13, fontWeight: "bold", cursor: "pointer", fontFamily: "'Georgia', serif" }}>💾 Save</button>
-        </div>
-        {confirmSave && (
-          <div style={{ background: "#0d1a0f", border: "1px solid #22c55e44", borderRadius: 10, padding: "14px 18px", marginBottom: 14, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            <span style={{ color: "#86efac", fontSize: 13 }}>Save & finish game?</span>
-            <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={saveGame} style={{ background: "#14532d", border: "none", borderRadius: 6, padding: "6px 14px", color: "#86efac", cursor: "pointer", fontFamily: "'Georgia', serif", fontWeight: "bold" }}>Save</button>
-              <button onClick={() => setConfirmSave(false)} style={{ background: "#1e293b", border: "1px solid #334155", borderRadius: 6, padding: "6px 14px", color: "#94a3b8", cursor: "pointer", fontFamily: "'Georgia', serif" }}>Cancel</button>
-            </div>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 3 }}>
+            <button onClick={finishGame} style={{ background: "linear-gradient(135deg, #14532d, #0f2340)", border: "1px solid #22c55e", borderRadius: 8, padding: "8px 14px", color: "#86efac", fontSize: 13, fontWeight: "bold", cursor: "pointer", fontFamily: "'Georgia', serif" }}>✓ Finish</button>
+            {autoSaveStatus === "saving" && <span style={{ fontSize: 10, color: "#4b6a9e" }}>saving...</span>}
+            {autoSaveStatus === "saved" && <span style={{ fontSize: 10, color: "#22c55e" }}>✓ saved</span>}
+            {autoSaveStatus === "error" && <span style={{ fontSize: 10, color: "#ef4444" }}>save error</span>}
           </div>
-        )}
+        </div>
+
         <div style={{ ...cardStyle, display: "flex", alignItems: "center", gap: 12 }}>
           <div style={{ fontSize: 11, letterSpacing: "0.3em", color: "#4b6a9e", textTransform: "uppercase", whiteSpace: "nowrap" }}>Pitcher #</div>
           <input type="number" min="0" max="99" value={pitcherNumber} onChange={e => setPitcherNumber(e.target.value)} placeholder="—" style={{ flex: 1, background: "#0d1525", border: "1px solid #1e3a6e", borderRadius: 8, padding: "8px 14px", color: "#e8eaf6", fontSize: 22, fontWeight: "bold", fontFamily: "'Georgia', serif", outline: "none", textAlign: "center", appearance: "textfield", MozAppearance: "textfield", WebkitAppearance: "none" }} />
